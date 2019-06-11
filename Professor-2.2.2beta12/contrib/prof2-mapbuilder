@@ -1,0 +1,60 @@
+#! /usr/bin/env python
+
+'''Call with args: parameters, directory of limit files (REFDIR>param1_param2_fixed>(limits_index1_index2.txt, index1_index2_chi.txt)), # points. Amalgamates all the chi2 files from prof2-tune-queue into a set of coordinates which can be plotted with heatmapper
+'''
+import optparse, os, sys
+op = optparse.OptionParser(usage=__doc__)
+op.add_option("--params", dest="WFILE", default=None, help="Path to a weight file to specify unequal chi2 weights of each bin in the fit (default: %default)")
+op.add_option("--output", dest="OUTPUT", default="tunes", help="Prefix for outputs (default: %default)")
+
+opts, args = op.parse_args()
+if len(args) < 1:
+    print "Argument missing... exiting\n\n"
+    op.print_usage()
+    sys.exit(1)
+with open(args[0], "r") as f:
+    params = f.read().splitlines()
+REFDIR = args[1]
+N = int(args[2])
+print params
+
+from numpy import zeros
+import yoda
+yodas3d=[]
+for i, p1 in enumerate(params):
+    for j, p2 in enumerate(params):
+	if i<j:
+	    print p1, p2
+	    scatter = []
+	    x = zeros((N, N))
+	    y = zeros((N, N))
+	    z = zeros((N, N))
+	    for n in range(N):
+		for m in range(N):
+		    with open("{0}{1}_{2}_fixed/limits_{3}_{4}.txt_chi.txt".format(REFDIR, p1, p2, n, m)) as chi:
+		        chi2 = chi.read()
+		    z[n][m] = chi2
+		    with open("{0}{1}_{2}_fixed/limits_{3}_{4}.txt".format(REFDIR, p1, p2, n, m)) as lim:
+			lims = {}
+			for line in lim:
+			    parts = line.split()
+			    key = parts[0]
+			    val = parts[1]
+			    lims[key] = val
+		    x[n][m] = lims[p1]
+		    y[n][m] = lims[p2]
+	    
+	    s=yoda.Scatter3D(path="PROFLIKE/%s%s"%(p1, p2), title=p1+"vs"+p2)
+	    dx = (x[1][1] - x[0][1])*0.5
+	    print dx
+            dy = (y[1][1] - y[1][0])*0.5
+            for n in range(N):
+		for m in range(N):
+		    i=x[n][m]
+		    j=y[n][m]
+                    k=z[n][m]
+                    s.addPoint(i,j,k, xerrs=dx, yerrs=dy)
+            yodas3d.append(s)
+        yoda.writeYODA(yodas3d, "%s_2dproflike.yoda" % opts.OUTPUT)
+
+

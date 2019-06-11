@@ -1,0 +1,198 @@
+#! /usr/bin/env python
+
+"""\
+%prog [-o out1] [-t template1.txt -t ...] PARAM1:low1:high1 PARAM2:low2:high2:'exp(x)'
+or
+%prog [-o out1] [-t template1.txt -t ...] myparamfile
+
+Sample a parameter space, creating a set of parameter files and optionally
+substituting into script templates, with either flat sampling (default) or
+sampling in a transformed space.
+
+Parameter ranges (and bias functions) can either be given inline on the command line,
+with the name, low..high range, and optional bias function separated by colons (:),
+or in a parameter range file with one parameter per line and whitespace separation of
+the name, low, high, and bias terms.
+
+TODO:
+ * copy the file mode (esp. executable) from the template to each instantiation
+"""
+
+import optparse
+op = optparse.OptionParser(usage=__doc__)
+op.add_option("-n", dest="NUMPOINTS", metavar="NUM", type=int, default=100, help="number of samples to generate [default=%default]")
+op.add_option("-t", dest="TEMPLATES", metavar="FILE", action="append", default=[], help="specify a template file to be populated for each sample point. Can be given multiple times. Strings in curly braces are instantiated.")
+op.add_option("-o", "--outdir", dest="OUTDIR", metavar="DIR", default="scan", help="specify the output directory name (default: %default)")
+op.add_option("-m", "--outmode", dest="OUTMODE", metavar="MODE", default="hier", help="specify the output structuring mode: either 'hier' (default) or 'flat' to respectively use run subdirs or not or 'table' to create one text file with a table like structure")
+op.add_option("-p", "--pfile", dest="PARAMSFILE", metavar="FILE", default="params.dat", help="specify params file base name to be populated for each sample point")
+op.add_option("-s", "--seed", dest="SEED", metavar="VAL", default=None, help="Random seed for the sampler (default: use system time)")
+op.add_option("--veto", dest="VETOFN", metavar="FILE", default=None, help="specify a file from which to read the definition of a Python sample point-vetoing function, prof_sample_veto(paramsdict). Return True means 'veto point'")
+op.add_option("--sobol", dest="SOBOL", action="store_true", default=False, help="Use sobol sampling")
+op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="turn on some debug messages")
+op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="turn off messages")
+opts, args = op.parse_args()
+assert opts.OUTMODE in ("hier", "flat", "table")
+
+import os
+
+def mkrunstr(num):
+    return "{run:04d}".format(run=num)
+
+def mkoutname(fname, run, prefix="", suffix=""):
+    if type(run) is int:
+        run = mkrunstr(run)
+    if opts.OUTMODE == "hier":
+        name = os.path.join(run, fname)
+    elif opts.OUTMODE == "flat":
+        fname = os.path.basename(fname)
+        base, ext = os.path.splitext(fname)
+        name = prefix + base + "-" + run + suffix + ext
+        print "Name:", name
+    elif opts.OUTMODE == "table":
+        name=fname
+    return os.path.join(opts.OUTDIR, name)
+
+
+def mkSubSamplers(alist):
+    try:
+        float(alist[-1])
+        bias = None
+    except ValueError:
+        bias = alist[-1]
+
+    slist=[]
+    Nsub = len(alist)-1 if bias is None else len(alist)-2
+    for i in xrange(Nsub):
+        slist.append( [alist[i], alist[i+1], bias] )
+    return slist
+
+
+def mkdir(path):
+    d = os.path.dirname(path) #< if path is to a dir, make sure to terminate with a /
+    if not os.path.exists(d):
+        os.makedirs(d)
+
+def sample(sdict, N, fveto, sobol=False, seed=None):
+    ## Do random param sampling and template instantiation
+    PPoints=[]
+    ranges = [[float(x[0]), float(x[1])] for x in sdict.values()]
+    biases = [x[2] for x in sdict.values()]
+    pnames = sdict.keys()
+
+    from professor2 import NDSampler
+    ND=NDSampler(ranges, biases, sobol, seed=seed)
+    for n in xrange(N):
+        # npad = mkrunstr(n)
+
+        ## Populate params dictionary
+        while True:
+            params = OrderedDict.fromkeys(pnames)
+            point = ND()
+            for num, p in enumerate(pnames):
+                params[p]=point[num]
+            ## Allow a user function to veto the point
+            if fveto is not None and fveto(params):
+                continue #< try sampling again
+            PPoints.append(params)
+            break #< successful sample: proceed
+
+    return PPoints
+
+
+def writeParams(P, outdir, subdir, fname, templates, mode):
+    from os.path import join, exists
+    for num, p in enumerate(P):
+        npad = mkrunstr(num)
+        if mode == "hier":
+            outd = join(outdir, subdir, npad)
+            outf = join(outd, fname)
+        else:
+            outd = join(outdir, subdir)
+            newfname = "%s.%s"%(fname, npad)
+            outf = join(outd, newfname)
+
+        if not exists(outd):
+            import os
+            os.makedirs(outd)
+
+        with open(outf, "w") as pf:
+            for k, v in p.iteritems():
+                pf.write("{name} {val:e}\n".format(name=k, val=v))
+
+        ## Instantiate template(s)
+        if mode=="hier":
+            p["N"] = npad #< Add the run number *after* writing out the params file
+            for tbasename, tmpl in templates.iteritems():
+                txt = tmpl.format(**p)
+                tname = join(outd, tbasename)
+                with open(tname, "w") as tf:
+                    tf.write(txt)
+
+
+
+## Populate dict of script templates
+TEMPLATES = {}
+for t in opts.TEMPLATES:
+    tname = os.path.basename(t)
+    with open(tname, "r") as f:
+        TEMPLATES[tname] = f.read()
+
+
+## Populate param samplers dictionary
+from professor2 import Sampler
+try:
+    from collections import OrderedDict
+except:
+    from ordereddict import OrderedDict
+
+samplers = OrderedDict()
+
+with open(args[0], "r") as prf:
+    for line in prf:
+        line = line.split("#")[0].strip() #< strip comments and whitespace
+        if line:
+            parts = line.split()
+            name = parts[0]
+            samplers[name]=mkSubSamplers(parts[1:])
+
+# This makes all the patches.
+# https://stackoverflow.com/questions/798854/all-combinations-of-a-list-of-lists
+import itertools
+patches = list(itertools.product(*samplers.values()))
+
+# Make a dictionary that the NDsampler understands for each patch
+patchDicts = []
+for p in patches:
+    stemp = OrderedDict.fromkeys(samplers.keys())
+    for num, k in enumerate(stemp.keys()):
+        stemp[k] = p[num]
+    patchDicts.append(stemp)
+
+
+## Load a point veto function if supplied by the user
+if opts.VETOFN:
+    execfile(opts.VETOFN)
+    assert "prof_sample_veto" in dir()
+    opts.VETOFN = prof_sample_veto
+
+# Sample points and write/print out
+for num, p in enumerate(patchDicts):
+    PP=sample(p, opts.NUMPOINTS, opts.VETOFN, opts.SEED)
+    print opts.SEED
+
+    if not opts.OUTMODE=="table":
+        if len(patchDicts)==1:
+            subdir=""
+        else:
+            subdir="sub%i"%num
+        writeParams(PP, opts.OUTDIR, subdir, opts.PARAMSFILE, TEMPLATES, opts.OUTMODE)
+    else:
+        t = "#"
+        for k in p.keys():
+            t+= " %s"%k
+        for point in PP:
+            x=point.values()
+            t+="\n"
+            for i in x:
+                t+="%e "%i
+        print t

@@ -1,0 +1,604 @@
+#! /usr/bin/env python
+
+"""\
+%prog rundir datadir [ipolfile=ipol.dat] [opts]
+
+Create a distribution of test statistic values by resampling all the
+data and MC values from normal distributions around their nominal values.
+
+TODO:
+ * Include correlations in the tuning and resampling.
+"""
+
+import optparse, os, sys
+op = optparse.OptionParser(usage=__doc__)
+op.add_option("--ierr",  dest="IERR", default="symm", help="Whether to interpolate MC errors: none, mean, median, symm (default: %default)") #< add rel, asymm
+op.add_option("--order", dest="ORDER", default=3, type=int, help="Global order of polynomials for interpolation")
+op.add_option("--eorder", dest="ERR_ORDER", default=None, type=int, help="Global order of polynomials for uncertainty interpolation (default: same as from --order)")
+op.add_option("--pname", "--pfile", dest="PNAME", default="params.dat", help="Name of the params file to be found in each run directory (default: %default)")
+op.add_option("-n", dest="NSAMPLES", type=int,  default=1, help="Number of samples")
+op.add_option("-j", dest="MULTI", type=int, default=1, help="Number of threads to use")
+op.add_option("--minos", dest="MINOS", default=False, action="store_true", help="Run Minos algorithm after minimisation")
+op.add_option("--wfile", dest="WFILE", default=None, help="Path to a weight file, used to restrict ipol building to a subset of bins (default: %default)")
+op.add_option("--limits", dest="LIMITS", default=None, help="Simple text file with parameter limits and fixed parameters")
+op.add_option("-g", "--gradient", dest="GRADIENT", action="store_true", default=False, help="Run minimisation with analytic gradient (EXPERIMENTAL!)")
+op.add_option("-s", "--strategy", dest="STRATEGY",  default=1, type=int, help="Set Minuit strategy [0 fast, 1 default, 2 slow]")
+op.add_option("-r", "--result", dest="RESULT",  default=None, help="Minimisation result to use for eigentunes calculation")
+op.add_option("--filter", dest="FILTER", action="store_true", default=False, help="Filter out data bins that have 0 error")
+op.add_option("--cl", "--perc", dest="PERCENTILE", type=float, default=95, help="Confidence level percentile for eigentunes")
+op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="turn off messages")
+op.add_option("-o", "--outfile", dest="OUTFILE", default="gofs.txt", help="Output file name for the gof measures")
+op.add_option("-p", "--prefix", dest="PREFIX", default="BURST", help="Output file name prefix")
+op.add_option("-O", "--outdir", dest="OUTDIR", default="MYBURST", help="Output directory")
+op.add_option("-S", "--subrun", dest="SUBRUN", default=0, type=int, help="Subrun in case of distributed computing")
+opts, args = op.parse_args()
+
+
+## Get mandatory arguments
+if len(args) < 1:
+    print "Argument missing... exiting\n\n"
+    op.print_usage()
+    sys.exit(1)
+RUNSDIR = args[0]
+REFDIR = args[1]
+IFILE = args[2] if len(args) > 2 else "ipol.dat"
+
+## By default, use the same ipol order for errors as for values
+if opts.ERR_ORDER is None:
+    opts.ERR_ORDER = opts.ORDER
+
+## Load the Professor machinery
+import professor2 as prof
+if not opts.QUIET:
+    print prof.logo
+
+IHISTOS, IMETA = prof.read_ipoldata(IFILE)
+PARAMS = prof.read_params(RUNSDIR, opts.PNAME)
+
+# Jeez Louis
+PARAMS, HISTOS = prof.read_all_rundata(RUNSDIR, opts.PNAME)
+# RUNS, PARAMNAMES, PARAMSLIST = prof.mk_ipolinputs(PARAMS)
+
+# Throw away those points not used in the original ipol
+USEDRUNS = IMETA["Runs"].split()
+from collections import OrderedDict
+USEDPARAMS = OrderedDict()
+for k, v in PARAMS.iteritems():
+    if k in USEDRUNS:
+        USEDPARAMS[k] = v
+
+## Weight file parsing to select a histos subset
+if opts.WFILE:
+    matchers = prof.read_pointmatchers(opts.WFILE)
+    for hn in IHISTOS.keys():
+        if not any(m.match_path(hn) for m in matchers.keys()):
+            del IHISTOS[hn]
+        elif opts.DEBUG:
+            print "Observable %s passed weight file path filter" % hn
+    print "Filtered observables by path, %d remaining" % len(IHISTOS)
+
+DHISTOS_raw = prof.read_all_histos(REFDIR)
+DHISTOS ={}
+
+# Throw away all data histos not needed
+for k in IHISTOS.keys():
+        DHISTOS[k]=DHISTOS_raw[k]
+del DHISTOS_raw
+
+matchers = prof.read_pointmatchers(opts.WFILE) if opts.WFILE else None
+
+if matchers is not None:
+    for hn in HISTOS.keys():
+        if not any(m.match_path(hn) for m in matchers.keys()):
+            del HISTOS[hn]
+        elif opts.DEBUG:
+            print "Observable %s passed weight file path filter" % hn
+
+# def mkSmearedIpolSet(inputHistos, inputParams):
+
+    # myHISTOS = {} #{'HISTONAME': {'0000': <Histo with 0 bins>}}
+
+    # # Smearing and preparation of ipol input
+    # for hname, ihist in inputHistos.iteritems():
+        # temp = {}
+        # for run, params in inputParams.iteritems():
+            # temp[run] = ihist.toDataHisto(params).mkSmearedCopy()
+        # myHISTOS[hname] = temp
+
+    # myUSEDRUNS, myPARAMNAMES, myPARAMSLIST = prof.mk_ipolinputs(inputParams)
+    # myHNAMES = sorted(inputHistos.keys())
+
+    # # print opts.MULTI
+    # CONFIG = {"MULTI":opts.MULTI, "ORDER":opts.ORDER, "ERR_MODE":opts.IERR, "ERR_ORDER":opts.ERR_ORDER, "QUIET":opts.QUIET}
+    # tempDict = prof.mkStandardIpols(myHISTOS, myHNAMES, myUSEDRUNS, myPARAMSLIST, CONFIG, referenceIpolSet=inputHistos)
+
+    # return tempDict, [myPARAMNAMES, myPARAMSLIST], myUSEDRUNS
+
+def mkSmearedIpolSet(inputHistos, inputParams, origIpol):
+
+    # from IPython import embed
+    # embed()
+    # import sys
+    # sys.exit(1)
+    myHISTOS = {} #{'HISTONAME': {'0000': <Histo with 0 bins>}}
+
+    # Smearing and preparation of ipol input
+    for hname, ihist in inputHistos.iteritems():
+        temp = {}
+        for run, params in inputParams.iteritems():
+            temp[run] = prof.DataHisto(ihist[run].bins, ihist[run].path).mkSmearedCopy()#ihist.toDataHisto(params).mkSmearedCopy()
+        myHISTOS[hname] = temp
+
+    myUSEDRUNS, myPARAMNAMES, myPARAMSLIST = prof.mk_ipolinputs(inputParams)
+    myHNAMES = sorted(inputHistos.keys())
+
+    # print opts.MULTI
+    CONFIG = {"MULTI":opts.MULTI, "ORDER":opts.ORDER, "ERR_MODE":opts.IERR, "ERR_ORDER":opts.ERR_ORDER, "QUIET":opts.QUIET}
+    tempDict = prof.mkStandardIpols(myHISTOS, myHNAMES, myUSEDRUNS, myPARAMSLIST, CONFIG, referenceIpolSet=origIpol)
+
+    return tempDict, [myPARAMNAMES, myPARAMSLIST], myUSEDRUNS
+
+def smearDataHistos(histDict):
+    rdict = {}
+    for k, v in histDict.iteritems():
+        DH = prof.DataHisto(v.bins, v.path).mkSmearedCopy()
+        rdict[k] = DH
+    return rdict
+
+
+# def mkFitFunc(dhistos, ipolfname, MAXERRDICT, MATCHERS, doFilter):
+    # import professor2 as prof
+    # ## Take parameter names directly from ifile, or fallback
+    # PNAMES = METADATA["ParamNames"].split()
+    # if not PNAMES:
+        # PNAMES = ["A%03i" % i for i in xrange(int(METADATA["Dimension"]))]
+
+
+    # ## Function definition wrapper
+    # funcdef = prof.mk_fitfunc("prof.simpleGoF", PNAMES, "profGoF", ["DBINS", "IBINS", "MAXERRS"])
+    # return funcdef
+
+
+def mkSingleTune(DHISTOS, ipolfname, MAXERRDICT, MATCHERS, doFilter):
+    import professor2 as prof
+    print "Load ipol from", ipolfname
+
+    IHISTOS, METADATA = prof.read_ipoldata(ipolfname)
+    DBINS, IBINS, MAXERRS = prof.prepareBins(DHISTOS, IHISTOS, MAXERRDICT, MATCHERS, doFilter)
+
+
+
+    ## Take parameter names directly from ifile, or fallback
+    PNAMES = METADATA["ParamNames"].split()
+    if not PNAMES:
+        PNAMES = ["A%03i" % i for i in xrange(int(METADATA["Dimension"]))]
+
+
+    ## Function definition wrapper
+    import math
+    funcdef = prof.mk_fitfunc("prof.simpleGoF", PNAMES, "profGoF", ["DBINS", "IBINS", "MAXERRS", "%f"%math.sqrt(2)])
+    exec funcdef in locals()
+    if opts.DEBUG:
+        print "Built GoF wrapper from:\n  '%s'" % funcdef
+
+
+
+    try:
+        from iminuit import Minuit
+    except ImportError, e:
+        print "Unable to import iminuit, exiting", e
+        print "Try installing iminuit with pip: pip install iminuit --user"
+        import sys
+        sys.exit(1)
+
+    if not opts.QUIET:
+        print "\n"
+        print 66*"*"
+        print "* Using iminuit, please visit https://github.com/iminuit/iminuit *"
+        print 66*"*"
+        print "\n"
+
+
+    # IHISTOS, METADATA = prof.read_ipoldata(ipolfname)
+    PMINS = [float(x) for x in METADATA["MinParamVals"].split()]
+    PMAXS = [float(x) for x in METADATA["MaxParamVals"].split()]
+    FARG = prof.setupMinuitFitarg(PNAMES,PMINS,PMAXS,opts.LIMITS)
+
+    # TODO: errordef as CL params?
+    PRINTLEVEL = 0 if opts.QUIET else 1
+
+    if opts.GRADIENT:
+        graddef = prof.mk_fitfunc("simpleGoFGradient", PNAMES, "myGrad")
+        exec graddef in locals()
+        minuit = Minuit(profGoF, grad_fcn=myGrad, errordef=1, print_level=PRINTLEVEL, forced_parameters=PNAMES, **FARG)
+    else:
+        minuit = Minuit(profGoF, errordef=1, print_level=PRINTLEVEL, forced_parameters=PNAMES, **FARG)
+    minuit.strategy = opts.STRATEGY
+
+    import time
+    start_time = time.time()
+    ## Lift off
+    minuit.migrad()
+    if opts.MINOS:
+        minuit.minos()
+    if not opts.QUIET:
+        print("Minimisation finished after %s seconds" % (time.time() - start_time))
+
+    MIN = [minuit.values[p] for p in PNAMES]
+
+    ## Goodness of fit etc
+    chi2 = minuit.fval
+
+    return chi2, MIN, minuit.covariance, len(IBINS)
+
+
+def mkGoFPlot(X, dof=1295):
+    import numpy as np
+    g_68 = np.percentile(X, 68.8)
+    g_95 = np.percentile(X, 95)
+    g_99 = np.percentile(X, 99.9)
+
+    import pylab
+    pylab.axvspan(min(X), g_68, label="68.8 pct", facecolor="b", alpha=0.1)
+    pylab.axvspan(g_68, g_95, label="95 pct", facecolor="r", alpha=0.1)
+    pylab.axvspan(g_95, g_99, label="99.9 pct", facecolor="g", alpha=0.1)
+    pylab.hist(X, "auto", normed=True, histtype="step")
+    # from scipy.stats import chi2
+    # x = np.linspace(chi2.ppf(0.01, dof), chi2.ppf(0.99, dof), 100)
+    # pylab.plot(x, chi2.pdf(x, dof), 'r-', lw=5, alpha=0.6, label='chi2 pdf dof=%i'%dof)
+    pylab.legend()
+    pylab.xlabel(r"$\chi^2$")
+    pylab.ylabel(r"$p(X = \chi^2)$")
+    pylab.savefig("%s-myprofgof.pdf" % opts.PREFIX)
+
+    pylab.clf()
+    pylab.hist(X, "auto", normed=True, cumulative=True, histtype="step")
+    pylab.xlabel(r"$\chi^2$")
+    pylab.ylabel(r"$P(X < \chi^2)$")
+    pylab.savefig("%s-myprofgofcum.pdf" % opts.PREFIX)
+
+
+def mySolve(center_t, direction_t, TRAFO, GOFdef, target):
+    exec GOFdef in globals() # Note globals!
+
+    def getVal(a):
+        temp_t = center_t +  a*direction_t
+        temp = TRAFO * temp_t.transpose()
+        temp_r = temp.transpose().tolist()[0]
+        return profGoF(*temp_r) - target
+
+    def getP(a):
+        temp_t = center_t +  a*direction_t
+        temp = TRAFO * temp_t.transpose()
+        return temp.transpose().tolist()[0]
+
+    from scipy.optimize import fsolve
+    x = fsolve(getVal,1)
+    print "Scaling is", x
+    return getP(x)
+
+
+def mkNewParamCorrelation(T_trans, T, point, GOFdef, target):# center_t, TRAFO, GOFdef, target, oldCOV, TRAFO_trans):
+    exec GOFdef in globals() # Note globals!
+
+    from numpy import matrix
+    rv = matrix(point.values())
+    center_t = (T_trans * rv.transpose()).transpose()
+
+
+    DIM = len(point.values())
+    from scipy.optimize import fsolve
+    from numpy import zeros,diag
+
+    def getVal(a, direction):
+        temp_t = center_t +  a*direction
+        temp = T * temp_t.transpose()
+        temp_r = temp.transpose().tolist()[0]
+        return profGoF(*temp_r) - target
+
+    def getX(a, direction):
+        return center_t +  a*direction
+
+    newdiag = []
+    for i in xrange(DIM):
+        ev = zeros(DIM)
+        ev[i] = 1
+        temp  = fsolve(lambda x:getVal(x, ev), 1)
+        temp2 = fsolve(lambda x:getVal(x, -ev), 1)
+        if temp > temp2:
+            newdiag.append(temp)
+        else:
+            newdiag.append(temp2)
+
+    N = diag([x[0] for x in newdiag])
+    return T_trans*N*T
+
+
+def mkEigentunes(T_trans, T, point, GOFdef, target, plus=True):
+    """
+    COV   ... real symmetric covariance matrix
+    point ... could be any point in the true parameter space but should be
+              the minimisation result i.e. the center of COV
+    """
+    from numpy import sqrt, zeros, matrix
+    ## Transform the minimisation result into the other coordinate system
+    rv = matrix(point.values())
+    rv_trans = (T_trans * rv.transpose()).transpose()
+    ret = []
+
+    ## Construct all base vectors (in rotated system) with pos and neg directions
+    dim = len(point.values())
+    EVS = []
+    for i in xrange(dim):
+        ev = zeros(dim) # A zero vector in len(S) dimensions
+        # Set one of the coordinates to 1 or -1
+        ev[i] = 1 if plus else -1
+        EVS.append(ev)
+        print ev
+
+    ## Get the eigentunes
+    for num, ev in enumerate(EVS):
+        thisEigentune =  mySolve(rv_trans, ev, T, GOFdef, target)
+        ret.append([int(ev[num]*(num+1)), thisEigentune])
+
+    return ret
+
+
+def calcHistoCov(h, COV_P, result):
+    """
+    Propagate the parameter covariance onto the histogram covariance
+    using the ipol gradients.
+    """
+    IBINS = h.bins
+    from numpy import zeros
+    COV_H = zeros((h.nbins, h.nbins))
+    from numpy import array
+    for i in xrange(len(IBINS)):
+        GRD_i = array(IBINS[i].grad(result))
+        for j in xrange(len(IBINS)):
+            GRD_j = array(IBINS[j].grad(result))
+            pc = GRD_i.dot(COV_P).dot(GRD_j)
+            COV_H[i][j] = pc
+    return COV_H
+
+
+def mkErrorPropagationHistos(IHISTOS, point, COV, combine=False):
+    covs = {}
+    properrs = {}
+    ipolerrs = {}
+    ipolvals = {}
+    from numpy import sqrt
+    for k, v in IHISTOS.iteritems():
+        covs[k] = calcHistoCov(v, COV, point)
+        properrs[k] = sqrt(covs[k].diagonal())
+        ipolerrs[k] = [b.err  for b in v.toDataHisto(point).bins]
+        ipolvals[k] = [b.val  for b in v.toDataHisto(point).bins]
+
+    scatters = []
+    for k, v in IHISTOS.iteritems():
+        T = v.toDataHisto(point)
+        for i in xrange(T.nbins):
+            T.bins[i].errs = properrs[k][i] if combine is False else \
+                             sqrt(properrs[k][i]**2 + ipolerrs[k][i]**2)
+        scatters.append(T.toScatter2D())
+    return scatters
+
+
+def mkScatters(ipolH, ppoint):
+    scatters_e = []
+    for k in sorted(ipolH.keys()):
+        v = ipolH[k]
+        T = v.toDataHisto(ppoint)
+        scatters_e.append(T.toScatter2D())
+    return scatters_e
+
+
+def covarianceToList(cov, pnames):
+    """
+    Reformat minuit covariance matrix dict to single line, e.g. 3 dimensions
+        0 1 2
+        1 3 4   --> [0 1 2 3 4 5]
+        2 4 5
+    """
+    covline = []
+    for i, px in enumerate(pnames):
+        for j, py in enumerate(pnames):
+            if i <= j:
+                covline.append(cov[(px, py)])
+    return covline
+
+
+def mkEnvelopes(central, etunes):
+    ret = {}
+    for i in xrange(1, len(etunes.keys())-2):
+        ret[i] = []
+        Hplus  = etunes[i]
+        Hminus = etunes[-i]
+        for num_h, h in enumerate(central):
+            temp = h.clone()
+            for num_p, p in enumerate(temp.points):
+                yplus  = Hplus[num_h].points[num_p].y
+                yminus = Hminus[num_h].points[num_p].y
+                if yplus > p.y:
+                    eplus  = yplus - p.y
+                    eminus = p.y - yminus
+                else:
+                    eplus  = yminus - p.y
+                    eminus  = p.y - yplus
+                p.yErrs = (eminus, eplus)
+            ret[i].append(temp)
+    return ret
+
+
+def writeToFile(items, nbins, params, outdir, fname, suffix):
+    """
+    Write out gof values to file as well as some meta info in the first lines
+    """
+    head = "# Nbins %i\n# Parameters"%nbins
+    for p in params:
+        head += " %s"%p
+    head += "\n"
+
+    import os
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    fname += "-%i.txt"%suffix
+    outname = os.path.join(outdir, fname)
+    with open(outname, "w") as f:
+        f.write(head)
+
+        for g in items:
+            if type(g) is list:
+                temp =""
+                for i in g:
+                    temp += " %e" % i
+                f.write(temp.strip() + "\n")
+            else:
+                f.write("%e\n" % g)
+
+
+def writeMINS(mins, outdir, params, suffix=None):
+    """
+    Write out gof values to file as well as some meta info in the first lines
+    """
+    head = "# Parameters"
+    for p in params:
+        head += " %s"%p
+    head += "\n"
+
+    import os
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    fname = "results.txt" if suffix is None else "results-%s.txt" % suffix
+    outname = os.path.join(outdir, fname)
+    with open(outname, "w") as f:
+        f.write(head)
+        for m in mins:
+            temp = ""
+            for i in m:
+                temp += " %e" % i
+            f.write(temp.strip()+"\n")
+
+
+def writeCOVS(covs, outdir, params, suffix=None):
+    """
+    Write out gof values to file as well as some meta info in the first lines
+    """
+    head = "# Parameters"
+    for p in params:
+        head += " %s"%p
+    head += "\n"
+
+    import os
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    fname = "covariances.txt" if suffix is None else "covariances-%s.txt" % suffix
+    outname = os.path.join(outdir, fname)
+    with open(outname, "w") as f:
+        f.write(head)
+
+        for c in covs:
+            temp = ""
+            for i in c:
+                temp += " %e" % i
+            f.write(temp.strip()+"\n")
+
+GOFS = []
+MINS = []
+COVS = []
+if len(args) == 4:
+    with open(args[3]) as f:
+        for l in f:
+            GOFS.append(float(l.strip()))
+
+else:
+    NBINS = 0
+    PNAMES = []
+    for i in range(opts.NSAMPLES):
+        print "Iteration", i+1, "/", opts.NSAMPLES
+        IDICT, PARAMS, RUNS = mkSmearedIpolSet(HISTOS, USEDPARAMS, IHISTOS)
+        # IDICT, PARAMS, RUNS = mkSmearedIpolSet(IHISTOS, USEDPARAMS)
+        PNAMES = PARAMS[0]
+        # Write the ipol into a temp file
+        temp = prof.writeIpol("temp", IDICT, PARAMS, RUNS, "", "")
+        # from IPython import embed
+        # embed()
+        # import sys
+        # sys.exit(1)
+        del IDICT
+        # Also smear the input data
+        # DHISTOS_smeared = smearDataHistos(DHISTOS)
+        DHISTOS_smeared = DHISTOS
+        gof, minimum, covariance, nbins = mkSingleTune(DHISTOS_smeared, temp.name, None, matchers, opts.FILTER)
+        GOFS.append(gof)
+        MINS.append(minimum)
+        COVS.append(covarianceToList(covariance, PNAMES))
+        NBINS = nbins
+
+        # Delete temp file
+        # import os
+        # os.remove(temp.name)
+
+    writeToFile(GOFS, NBINS, PNAMES, opts.OUTDIR, "gof", opts.SUBRUN)
+    writeToFile(MINS, NBINS, PNAMES, opts.OUTDIR, "results", opts.SUBRUN)
+    writeToFile(COVS, NBINS, PNAMES, opts.OUTDIR, "covariances", opts.SUBRUN)
+    # writeMINS(MINS, opts.OUTDIR, PNAMES, opts.SUBRUN)
+    # writeCOVS(COVS, opts.OUTDIR, PNAMES, opts.SUBRUN)
+
+    # with open("%s-%s"%(opts.PREFIX,opts.OUTFILE), "w") as f:
+        # for g in GOFS:
+            # f.write("%f\n"% g)
+
+
+
+mkGoFPlot(GOFS)
+
+IHISTOS, METADATA = prof.read_ipoldata(IFILE)
+PNAMES = METADATA["ParamNames"].split()
+DBINS, IBINS, MAXERRS = prof.prepareBins(DHISTOS, IHISTOS, None, matchers, opts.FILTER)
+F = prof.mk_fitfunc("prof.simpleGoF", PNAMES, "profGoF", ["DBINS", "IBINS", "MAXERRS"])
+#F = mkFitFunc(DHISTOS, IFILE,None, matchers, opts.FILTER)
+
+import yoda
+if opts.RESULT is not None:
+    # Read the tuning result
+    P_min, OTH = prof.readResult(opts.RESULT)
+    C_param = prof.getParamCov(OTH) # That's the minimiser covariance
+    import professor2 as prof
+    # S, T_fwd are the return values if linalg.eig(COV)
+    # with S being the eigenvalues and T_fwd being composed of
+    # the eigenvectors
+    T_fwd, S, T_back = prof.eigenDecomposition(C_param)
+
+    # Get the gof target according to the required percentile
+    import numpy as np
+    gof_target = np.percentile(GOFS, opts.PERCENTILE)
+
+    # Calculate the eigen tunes (points in parameter space)
+    E_plus  = mkEigentunes(T_fwd, T_back, P_min, F, gof_target)
+    E_minus = mkEigentunes(T_fwd, T_back, P_min, F, gof_target, plus=False)
+    ETs = dict(E_plus+E_minus)
+
+    # Get the corresponding ipol histos
+    EThists = {}
+    for k, ET in ETs.iteritems():
+        thisEThists = mkScatters(IHISTOS, ET)
+        sgn = "+" if k > 0 else "-"
+        yoda.writeYODA(thisEThists, "%s-Eigentunes_%.1f_%i%s.yoda"%(opts.PREFIX,opts.PERCENTILE, int(abs(k)), sgn))
+        EThists[k] = thisEThists
+
+    # And for convenience corresponding envelopes
+    H_min = mkScatters(IHISTOS, P_min)
+    envelopes = mkEnvelopes(H_min, EThists)
+    for k, v in envelopes.iteritems():
+        yoda.writeYODA(v, "%s-EigentunesComb_%.1f_%i.yoda"%(opts.PREFIX,opts.PERCENTILE, k))
+
+    # This is a (conservative) symmetric real parameter covariance matrix reflecting the eigentunes
+    C_param_new = mkNewParamCorrelation(T_fwd, T_back, P_min, F, gof_target)
+
+    # This is now error propagation
+    yoda.writeYODA(mkErrorPropagationHistos(IHISTOS, P_min,C_param_new, True), "%s-ih_comberr_eigcov_%.1f.yoda"%(opts.PREFIX,opts.PERCENTILE))
+    yoda.writeYODA(mkErrorPropagationHistos(IHISTOS, P_min,C_param    , True), "%s-ih_comberr_mincov_%.1f.yoda"%(opts.PREFIX,opts.PERCENTILE))
+    # from IPython import embed
+    # embed()

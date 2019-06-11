@@ -1,0 +1,104 @@
+#! /usr/bin/env python
+
+"""\
+%prog PARAMETERFILE  DATAFILE
+
+Interpolate histo bin values as a function of the parameter space by loading
+from the usual data directory structure $datadir/mc/{rundirs}
+
+TODO:
+ * Handle weight files/args
+ * Handle run combination file/string (write a hash of the run list into the ipol filename?)
+"""
+
+import optparse
+op = optparse.OptionParser()
+# TODO: Remove demo
+op.add_option("--ifile", dest="IFILE", default="ipol.dat", help="file into which to write the bin interpolations (default: %default)")
+op.add_option("--info", dest="INFO", default=None, help="Info string to be written to output file")
+op.add_option("--order", dest="ORDER", default=3, type=int, help="Global order of polynomials for interpolation")
+op.add_option("--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+op.add_option("--quiet", dest="QUIET", action="store_true", default=False, help="Turn off messages")
+op.add_option("--exclude", dest="EXCLUDE", default=None, help="exclude these lines, comma separated string")
+# TODO: Add weight file parsing to decide which histos (and bin subsets) to interpolate
+opts, args = op.parse_args()
+
+
+
+import professor2 as prof
+
+if not opts.QUIET:
+    print prof.logo
+
+import sys
+if not len(args)==2:
+    print "Error: need two CL args (Anchors, DATA), exiting"
+    sys.exit(1)
+
+# Load anchors (A) and BR data (D)
+from numpy import loadtxt, array
+A = loadtxt(args[0])#, usecols = (0,1,2,4,5,6,7))
+D = loadtxt(args[1])# [0:len(A)]
+if opts.EXCLUDE is not None:
+    excl = map(int, opts.EXCLUDE.split(","))
+    A_mod = [a for num, a in enumerate(A) if not num+1 in excl]
+    D_mod = [d for num, d in enumerate(D) if not num+1 in excl]
+    A=array(A_mod)
+    D=array(D_mod)
+print len(A), len(D)
+assert(len(A) == len(D))
+
+# Column titles
+with open(args[1]) as f:
+    labels=filter(lambda x:'#' not in x, f.readline().split())
+
+IPOLS={}
+for num, l in enumerate(labels):
+    if opts.DEBUG:
+        print "Interpolating " + l
+    else:
+        print "\r%.1f per cent interpolated"%((float(num+1)/len(labels))*100),
+
+    ipol = prof.Ipol(A, D[:,num], opts.ORDER)
+    IPOLS[l] = ipol
+
+
+with open(opts.IFILE, "w") as f:
+    if opts.INFO is not None:
+        f.write("Info: %s\n"%opts.INFO)
+    f.write("AnchorFile: %s\n"%args[0])
+    f.write("DataFile: %s\n"%args[1])
+    f.write("ProfVersion: %s\n"%prof.mk_versionstring())
+    f.write("Date: %s\n"%prof.mk_timestamp())
+    f.write("DataFormat: tabulated\n") # That tells the reader how to treat the coefficients that follow
+    # Format and write out parameter names
+    #pstring = "Params:"
+    #for p in PARAMNAMES:
+        #pstring+=" %s"%p
+    #f.write(pstring+"\n")
+    # Dimension (consistency check)
+    f.write("Dimension: %i\n"%len(A[0]))
+    # Interpolation validity (hypercube edges)
+    minstring = "MinParamVals:"
+    for v in prof.mk_minvals(A):
+        minstring+=" %f"%v
+    maxstring = "MaxParamVals:"
+    for v in prof.mk_maxvals(A):
+        maxstring+=" %f"%v
+    f.write(minstring+"\n")
+    f.write(maxstring+"\n")
+    # Number of inputs per bin
+    f.write("NInputs: %i\n"%len(A))
+    f.write("# End of header\n---\n")
+
+
+## Write out interpolation persistency info
+s = ""
+for hname, i in IPOLS.iteritems():
+    s += "/%s\n" % (hname)
+    s += "  " + i.toString("val") + "\n"
+# Open file for write/append
+with open(opts.IFILE, "a") as f:
+    f.write(s)
+
+print "\nOutput written to %s"%opts.IFILE

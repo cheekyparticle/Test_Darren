@@ -1,0 +1,54 @@
+#!/usr/bin/env python
+
+import numpy as np
+def f(x):
+    # return 3*x**3 + 2*x +1
+    return (10 +3*x)/(6.+5*x**2)
+# TODO: also try a non-polynomial function, e.g. sin
+
+A = np.linspace(1, 5, 100)
+Y = f(A)
+
+import professor2 as prof
+X = np.array([[a] for a in A])
+ipol = prof.Ipol(X, Y, 3)
+Z = [ipol.value(x) for x in X]
+
+Yprime = [z/Y[num] for num, z in enumerate(Z)]
+iprime=prof.Ipol(X,Yprime,3)
+
+
+
+
+def mkPade(X, Yraw, order, nit):
+    import professor2 as prof
+    Y=Yraw
+    istandard = prof.Ipol(X, Y, 3)
+    Zs=[istandard.val(x) for x in X]
+    pylab.plot(X, Zs, "bx", label="Standard" )
+    for i in xrange(nit):
+        print "Iteration", i
+        ipol = prof.Ipol(X, Y, 1)
+        Z = [ipol.value(x) for x in X]
+        Yprime = [z/Y[num] for num, z in enumerate(Z)]
+        iprime=prof.Ipol(X, Yprime, order)
+        Zprime = [iprime.value(x) for x in X]
+        # print ipol
+        # print iprime
+        # print f(X[2]), ipol.val(X[2]), iprime.val(X[2]), ipol.val(X[2])/iprime.val(X[2])
+
+        pylab.plot(X, [ipol.val(x)/iprime.val(x) for x in X], "-", label="Iteration %i" % (i))
+        if i < nit:
+            Y = [y*Zprime[num] for num, y in enumerate(Yraw)]
+    pylab.legend(loc=2)
+    pylab.show()
+    return ipol, iprime
+
+import pylab, sys
+pylab.plot(A, Y, "ro", label="Anchors")
+a,b = mkPade(X,Y,2,int(sys.argv[1]))
+
+# from IPython import embed
+# embed()
+
+

@@ -1,0 +1,165 @@
+Professor 2 -- new machinery for fast parameterisation and MC tuning
+====================================================================
+
+Professor 2 is a new, ground-up rewrite of the Professor MC tuning
+machinery. The new design is much simpler, faster, and more flexible.
+
+Unlike in Professor 1, it is now reasonable for users to write their own custom
+Python scripts to make direct use of the fast parameterisation objects in ways
+specific to their needs. The set of pre-made scripts emphasises this by
+containing fewer "single purpose" tools.
+
+Professor 2 is a work in progress -- not all the features of Professor 1's
+scripts have yet been provided. Feedback to professor@lists.hepforge.org is more
+than welcome!
+
+  Andy Buckley & Holger Schulz
+  October 2015
+
+
+Dependencies
+------------
+
+Absolute (for pure C++ use, restricted functionality):
+
+  C++ compiler with C++11 support
+  Eigen3 library
+
+Required for standard scripts:
+
+  Python interpreter
+  Cython compiler (only needed for not-from-tarball builds)
+  YODA library
+  numpy library
+
+Optional:
+
+  matplotlib library
+  sympy library
+
+
+Installation
+------------
+
+Professor 2 is built and installed using a minimal makefile setup. You must have
+the Eigen3 linear algebra library, a C++ compiler, and the Python interpreter.
+
+If you are not building from a tarball, you will need the Cython tool on your
+system to generate a C++ source file that connects the libProfessor2 library to
+Python; if building from a tarball, this intermediate file should already exist
+and you don't need Cython.
+
+If these tools are provided by your OS (e.g. the Ubuntu libeigen3-dev, g++,
+python and cython packages) then the build command is just:
+
+  $ make
+
+That's all!
+
+If you want to use a non-system Eigen3 installation, then
+you will need to specify the Eigen3 header location by hand:
+
+  $ make CPPFLAGS="-I/path/to/eigen-3.x.y"
+
+The -I path passed above should be one that directly contains the "Eigen3"
+directory of C++ header files.
+
+If you want to use non-standard compilers, then you should add their bin
+directories to your PATH environment variable in the usual way, or pass the CXX,
+PYTHON and/or CYTHON variables to make, e.g.:
+
+  $ make CXX=clang++ CYTHON=/path/to/my/cython
+
+Once you have a working build, you should really install Professor 2 to a prefix
+directory somewhere outside the source directory, e.g.:
+
+  $ make install PREFIX=/path/to/mylocal
+
+Make sure that .../mylocal/bin is in your PATH variable, .../mylocal/lib is in
+your (DY)LD_LIBRARY_PATH variable, and .../mylocal/lib/python2.?/site-packages
+is in your PYTHONPATH variable. Then it _should_ work -- try opening a Python
+prompt and importing the professor2 module:
+
+  $ python
+  >>> import yoda
+  >>>
+
+(Silence = success! Exit with Ctrl-D)
+
+The library and script names are all distinct from Professor 1, so you can have
+both installed at the same time if you want.
+
+
+Usage
+-----
+
+The "normal" use pattern for Professor is to make a set of optimised polynomial
+interpolations of (perhaps many) histograms as a function of some model
+parameters. Professor 2 can be programmed to read in data from any directory
+structure, any data type, etc. but in the pre-written scripts we assume some
+standard structure to make life easier.
+
+Sampling:
+
+  The first script, prof2-sample, is used to uniformly sample a parameter hypercube
+  and write out a set of sample directories. Each resulting directory will contain
+  a params.dat file and optionally an arbitrary number of files created by
+  substituting parameter values into template files.
+
+    $ prof2-sample -n 100 -t mytemplates/myscript.sh PARAM1:0:1 PARAM2:10:100
+    $ ls scan/0000/
+    myscript.sh params.dat
+
+  You can change the names of the output directory, the params file, etc. You can
+  also sample non-linearly and impose constraints between parameters (e.g. PARAM2
+  > 100*PARAM1). See prof2-sample --help for details.
+
+Interpolating:
+
+  Building interpolations only requires the set of directories created above,
+  with histogram files in each one. At present these histograms need to be in a
+  format readable by YODA. Here's how to build an interpolation file, containing
+  parameterisations of the observables read from the per-run histogram files, as a
+  function of the params:
+
+    $ prof2-ipol scan/
+    $ ls
+    ipol.dat scan
+
+  The ipol.dat file is a text-based format containing all the parameterised
+  observable definitions -- you can change this filename using the --ifile
+  option. You can also change the polynomial order with --order and change the
+  parameterisation of MC bin error using --ierr; use --help for more details.
+
+Checking parameterisation trustworthiness:
+
+  It's a good idea to make sure that the polynomial interpolations are able to
+  accurately describe the input data. For this you can use prof2-residuals, which
+  tests the interpolations from ipol.dat against a set of pseudodata directories:
+
+    $ prof2-residuals scan/ ipol.dat
+
+  The output will be a set of plots of (MC-data)/data, averaged over the bins of
+  each observable.  It's a good idea to test against a different subset of your
+  data points than the ones you used to fix the parameterisation, otherwise you
+  might get brilliant agreement by construction, but miss that points in-between
+  the fit inputs are not well described.
+
+Tuning:
+
+  Finally, you can tune with prof2-tune, giving it a reference data directory as
+  an argument (this is the first time that we have used "real data"):
+
+    $ prof2-tune myrefdata/ ipol.dat
+
+  Note that there is no need to have the scan directory anymore -- it was only
+  used to make ipol.dat (or whatever filename you chose), and it's the
+  parameterisations in ipol.dat that are being compared to the data. You could
+  easily use pseudodata -- the new minimal script design makes many inventive
+  things possible.
+
+Custom behaviours:
+
+  You can also write your own scripts to investigate brilliant new ideas about
+  the interplay of different interpolation schemes, data, pseudodata, input run
+  data, etc. etc. etc. Be creative!

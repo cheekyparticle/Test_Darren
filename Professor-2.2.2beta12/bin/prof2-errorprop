@@ -1,0 +1,179 @@
+#!/usr/bin/env python
+
+import sys
+import professor2 as prof
+
+
+def readResult(fname):
+    """
+       Open results file, extract and return minimum point as OrderedDict
+       and return raw list of all other lines for further processing.
+    """
+    RES=[]
+    OTH=[]
+    with open(fname) as f:
+        for line in f:
+            l=line.strip()
+            if l.startswith("#"):
+                OTH.append(l)
+            else:
+                temp=l.split()
+                RES.append([temp[0], float(temp[1])])
+
+    from collections import OrderedDict
+    return OrderedDict(RES), OTH
+
+def getParamCov(TXT, dim):
+    """
+       Read the covariance matrix from the lines, return as numpy array
+    """
+    START = TXT.index("# Correlation matrix:") + 2
+    END = START+dim
+    COV_raw = TXT[START:END]
+    from numpy import zeros
+    COV_p = zeros((dim, dim))
+    for i in xrange(dim):
+        temp = map(float, COV_raw[i].split()[2:2+dim])
+        for j in xrange(dim):
+            COV_p[i][j] = temp[j]
+
+
+    return COV_p
+
+def eigenDecomposition(mat):
+    """
+    Given a symmetric, real NxN matrix, M, an eigen decomposition is always
+    possible, such that M can be written as M = T_transp * S * T (orthogonal
+    transformation) with T_transp * T = 1_N and S being a diagonal matrix with
+    the eigenvalues of M on the diagonal.
+
+    Returns
+    -------
+    T_trans : numpy.matrix
+    S : numpy.ndarray
+        The real eigen values.
+    T : numpy.matrix
+    """
+    from scipy import linalg
+    from numpy import matrix
+    import numpy
+
+    A = matrix(mat)
+    #print "A = ", A
+    ## scipy.linalg.eig returns the transposed matrix of eigenvectors:
+    S, T_trans = linalg.eig(A)
+    #print S
+    #print T_trans
+    #print T_trans.transpose() * A * T_trans
+    if numpy.iscomplex(S).any():
+        raise ValueError("Given matrix `mat` has complex eigenvalues!")
+
+    return matrix(T_trans), S.real, matrix(T_trans).transpose()
+
+def mkEigentunes(COV, point, plus=True):
+    T_trans, S, T = eigenDecomposition(COV)
+    from numpy import sqrt, zeros, matrix
+    rv = matrix(point.values())
+    rv_trans = (T_trans * rv.transpose()).transpose()
+
+    ret = []
+
+    for num, c in enumerate(S):
+        ev = zeros(len(S))
+        sigma=sqrt(c)
+        if plus:
+            ev[num] =sigma
+        else:
+            ev[num] = -1* sigma
+        ev_trans = rv_trans + ev
+        etune_params_t = T * ev_trans.transpose()
+        etune_params = etune_params_t.transpose().tolist()[0]
+        ret.append([sigma, etune_params])
+
+    return ret
+
+
+
+
+def processHisto(h, COV, result):
+    IBINS=h.bins
+    from numpy import zeros
+    COV_H = zeros((h.nbins, h.nbins))
+    from numpy import array
+    for i in xrange(len(IBINS)):
+        GRD_i = array(IBINS[i].grad(result))
+        for j in xrange(len(IBINS)):
+            GRD_j = array(IBINS[j].grad(result))
+            pc =GRD_i.dot(COV).dot(GRD_j)
+            COV_H[i][j] = pc
+    return COV_H
+
+
+
+r, o = readResult(sys.argv[1])
+DIM=len(r.keys())
+C_param = getParamCov(o, DIM)
+
+# Read parameterisation
+IHISTOS, METADATA = prof.read_ipoldata(sys.argv[2])
+
+covs={}
+properrs = {}
+ipolerrs = {}
+ipolvals = {}
+from numpy import sqrt
+for k, v in IHISTOS.iteritems():
+    covs[k]     = processHisto(v, C_param, r)
+    properrs[k] = sqrt(covs[k].diagonal())
+    ipolerrs[k] = [b.err  for b in v.toDataHisto(r).bins]
+    ipolvals[k] = [b.val  for b in v.toDataHisto(r).bins]
+
+import yoda
+scatters=[IHISTOS[k].toDataHisto(r).toScatter2D() for k in sorted(IHISTOS.keys())]
+yoda.writeYODA(scatters, "ipolhistos_ipolerror.yoda")
+
+scatters2=[]
+for k, v in IHISTOS.iteritems():
+    T=v.toDataHisto(r)
+    for i in xrange(T.nbins):
+        T.bins[i].errs=properrs[k][i]
+    scatters2.append(T.toScatter2D())
+
+yoda.writeYODA(scatters2, "ipolhistos_properror.yoda")
+
+# Eigentunes
+E=mkEigentunes(C_param, r)
+E.extend(mkEigentunes(C_param, r, False))
+
+for num, e in enumerate(E):
+    scatters_e =[]
+    for k, v in IHISTOS.iteritems():
+        T=v.toDataHisto(e[1])
+        scatters_e.append(T.toScatter2D())
+    if (num+1)> len(E)/2:
+        yoda.writeYODA(scatters_e, "Eigentunes_%i_+.yoda"%(num+1 -len(E)/2))
+    else:
+        yoda.writeYODA(scatters_e, "Eigentunes_%i_-.yoda"%(num+1))
+
+
+
+
+def mkFitFunc(dhistos, ipolfname, MAXERRDICT, MATCHERS, doFilter):
+    import professor2 as prof
+    IHISTOS, METADATA = prof.read_ipoldata(ipolfname)
+    DBINS, IBINS, MAXERRS = prof.prepareBins(dhistos, IHISTOS, MAXERRDICT, MATCHERS, doFilter)
+
+
+    ## Take parameter names directly from ifile, or fallback
+    PNAMES = METADATA["ParamNames"].split()
+    if not PNAMES:
+        PNAMES = ["A%03i" % i for i in xrange(int(METADATA["Dimension"]))]
+
+
+    ## Function definition wrapper
+    funcdef = prof.mk_fitfunc("prof.simpleGoF", PNAMES, "profGoF", ["DBINS", "IBINS", "MAXERRS"])
+    return funcdef
+
+
+from IPython import embed
+embed()

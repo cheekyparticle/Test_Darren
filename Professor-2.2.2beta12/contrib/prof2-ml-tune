@@ -1,0 +1,331 @@
+#! /usr/bin/env python
+
+"""\
+%prog <refdir> [<ipolfile>=ipol.dat] [<runsdir>=<refdir>/../mc] [opts]
+
+Use the interpolations stored in <ipolfile> to find optimised parameters with
+the reference histograms found in the <refdir> as the optimisation target.
+
+The <runsdir> is used to calculate the maximum error value seen for each bin,
+to regularise interpolated errors which could otherwise blow up, leading to
+an unrepresentative small chi2 (and hence fit result) outside the sampled ranges.
+
+TODO:
+ * Handle run combination file/string (write a hash of the run list into the ipol filename?)
+"""
+
+import optparse, os, sys
+op = optparse.OptionParser(usage=__doc__)
+op.add_option("--wfile", dest="WFILE", default=None, help="Path to a weight file to specify unequal chi2 weights of each bin in the fit (default: %default)")
+op.add_option("--output", dest="OUTPUT", default="mltunes", help="Prefix for outputs (default: %default)")
+op.add_option("--limits", dest="LIMITS", default=None, help="Simple text file with parameter limits and fixed parameters")
+op.add_option("--scan", dest="SCAN", default=None, type=int, help="Perform a brute force scan of SCAN points to find minimiser start point")
+op.add_option("-g", "--gradient", dest="GRADIENT", action="store_true", default=False, help="Run minimisation with analytic gradient (EXPERIMENTAL!)")
+op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="Turn off messages")
+op.add_option("-s", "--strategy", dest="STRATEGY",  default=1, type=int, help="Set Minuit strategy [0 fast, 1 default, 2 slow]")
+opts, args = op.parse_args()
+
+## Get mandatory arguments
+if len(args) < 1:
+    print "Argument missing... exiting\n\n"
+    op.print_usage()
+    sys.exit(1)
+REFDIR = args[0]
+IFILE = "ipol.dat"
+RUNSDIR = os.path.join(REFDIR, "..", "mc")
+if len(args) >= 2:
+    IFILE = args[1]
+if len(args) >= 3:
+    RUNSDIR = args[2]
+
+
+# TODO: ipol fit limits are in the ipol datfile... automatically use them / warn if result is outside?
+
+
+## Load Professor and show the standard banner
+import professor2 as prof
+if not opts.QUIET:
+    print prof.logo
+
+
+## Read persisted interpolations to re-create the ipol Histos
+import cPickle
+IHISTOS=cPickle.load(open(IFILE))
+
+## Read reference data histos
+import os, sys, glob
+DHISTOS = {}
+REFFILES = glob.glob(os.path.join(REFDIR, "*"))
+for rf in REFFILES:
+    DHISTOS.update(prof.read_histos(rf))
+
+## Try to read run histos and extract maximum errors
+MAXERRDICT = None
+try:
+    rundirs = glob.glob(os.path.join(RUNSDIR, "*"))
+    _, RUNHISTOS = prof.read_rundata(rundirs, None) #< don't care about reading params files
+    MAXERRDICT = prof.find_maxerrs(RUNHISTOS)
+except:
+    print "Could not read run data for error regularisation -- chi2 may be unstable"
+
+## Weight file parsing
+matchers = prof.read_pointmatchers(opts.WFILE) if opts.WFILE else None
+
+
+## Find things available in both ipol and ref data, and in the weight file if there is one
+available = []
+for ihn in IHISTOS.keys():
+    ## Set default bin weights
+    for ib in IHISTOS[ihn].bins:
+        ib.w = 1.0
+    ## Find user-specified bin weights if there was a weight file
+    if matchers is not None:
+        ## Find matches
+        pathmatch_matchers = [(m,wstr) for m,wstr in matchers.iteritems() if m.match_path(ihn)]
+        ## Ditch histos not listed in the weight file
+        if not pathmatch_matchers:
+            del IHISTOS[ihn]
+            continue
+        ## Attach fit weights to the ibins, setting to zero if there's no position match
+        for ib in IHISTOS[ihn].bins:
+            posmatch_matchers = [(m,wstr) for (m,wstr) in pathmatch_matchers if m.match_pos(ib)]
+            ib.w = float(posmatch_matchers[-1][1]) if posmatch_matchers else 0 #< NB. using last match
+    for rhn in DHISTOS.keys():
+        if ihn in rhn: #< TODO: short for rhn = "/REF/"+ihn ?
+            # TODO: we should eliminate this potential mismatch of ref and MC hnames
+            available.append([ihn,rhn])
+            break #< TODO: ok?
+
+
+## Prepare lists of ibins and dbins
+IBINS, DBINS, MAXERRS = [], [], []
+for a in available:
+    # TODO: print out the available observables
+    IBINS.extend(IHISTOS[a[0]].bins)
+    DBINS.extend(DHISTOS[a[1]].bins)
+    if MAXERRDICT:
+        MAXERRS.extend(MAXERRS[a[0]])
+if not MAXERRS:
+    MAXERRS = None
+
+
+## Sanity checks
+assert len(IBINS) == len(DBINS)
+if not IBINS:
+    print "No bins ..., exiting"
+    sys.exit(1)
+assert MAXERRS is None or len(IBINS) == len(MAXERRS)
+
+
+def simpleGoF(params):
+    """
+    Very straightforward goodness-of-fit measure
+    """
+    chi2 = 0.0
+    for num, ibin in enumerate(IBINS):
+        ## Weight is attached to the ipol bin (default set to 1.0 above)
+        w = ibin.w
+        if w == 0:
+            continue
+        ## Get ipol & ref bin values and compute their difference
+        ival = ibin.val([params])
+        dval = DBINS[num].val
+        diff = dval - ival
+        ## Data error
+        err2 = DBINS[num].err**2
+        ## Plus interpolation error added in quadrature
+        maxierr = MAXERRS[ibin] if MAXERRS else None
+        # err2 += ibin.err(params, emax=maxierr)**2
+        # TODO: compute asymm error for appropriate deviation direction cf. sum([e**2 for e in ibin.ierrs])
+        if not err2:
+            raise prof.StatError("Zero uncertainty on a bin being used in the fit -- cannot compute a reasonable GoF")
+        # TODO: should we square w too, so it penalised deviations _linearly_?
+        chi2 += w * diff**2 / err2
+    return chi2
+
+
+
+
+DIM=IHISTOS[IHISTOS.keys()[0]].bins[0].mlval.support_vectors_.shape[-1]
+
+a=IHISTOS[IHISTOS.keys()[0]].bins[0].mlval.support_vectors_
+
+## Take parameter names directly from ifile, or fallback
+# PNAMES = METADATA["ParamNames"].split()
+# TODO pass PNAMES from outside? or put them into the ML bin?
+# if not PNAMES:
+PNAMES = ["A%03i" % i for i in xrange(DIM)]
+
+## Function definition wrapper
+funcdef = prof.mk_fitfunc("simpleGoF", PNAMES, "profGoF")
+exec funcdef in locals()
+if opts.DEBUG:
+    print "Built GoF wrapper from:\n  '%s'" % funcdef
+
+
+try:
+    from iminuit import Minuit
+except ImportError, e:
+    print "Unable to import iminuit, exiting", e
+    import sys
+    sys.exit(1)
+
+if not opts.QUIET:
+    print "\n"
+    print 66*"*"
+    print "* Using iminuit, please visit https://github.com/iminuit/iminuit *"
+    print 66*"*"
+    print "\n"
+
+## Ignition
+## Dictionary fitarg for iminuit
+FARG=dict()
+
+## Initial conditions --- use pos = center of hypercube, and step = range/10
+# TODO: Optionally make an initial brute force scan to choose the Minuit starting point, using prof.scangrid
+# pmins = [float(x) for x in METADATA["MinParamVals"].split()]
+# pmaxs = [float(x) for x in METADATA["MaxParamVals"].split()]
+# assert len(pmins) == len(pmaxs)
+
+# pmids = [(pmins[i] + pmaxs[i])/2. for i in xrange(len(pmins))]
+# pranges = [(pmaxs[i] - pmins[i]) for i in xrange(len(pmins))]
+
+
+# if opts.SCAN is not None:
+    # npoints_per_dim=opts.SCAN
+    # print "Scanning %i points"%(npoints_per_dim**len(pmins))
+    # setup=[]
+    # for num, p in enumerate(PNAMES):
+        # setup.append((p, npoints_per_dim, pmins[num], pmaxs[num]))
+
+    # grid=prof.scangrid(*setup)
+    # winner = grid.next()
+    # winner_v = simpleGoF([x[1] for x in winner])
+    # for num, g in enumerate(grid):
+        # currV=simpleGoF([x[1] for x in g])
+        # if currV < winner_v:
+            # winner=g
+            # winner_v=currV
+        # if ((num+1)%100 ==0):
+            # print "%i/%i complete"%(num+1, npoints_per_dim**len(pmins))
+
+    # # This sets the star point 
+    # #print "Using startpoint:"
+    # for i, aname in enumerate(PNAMES):
+        # assert(aname==winner[i][0])
+        # pmids[i] = winner[i][1]
+        # #print "%s = %f"%(aname, pmids[i])
+
+
+# for i, aname in enumerate(PNAMES):
+    # FARG[aname] = pmids[i]
+    # FARG['error_%s'%aname] = pranges[i] / 10.
+
+## Fix parameters, set limits (with pname translation)
+limits, fixed = prof.read_limitsandfixed(opts.LIMITS)
+
+for i, pname in enumerate(PNAMES):
+    if pname in limits.keys():
+        FARG['limit_%s'%pname] = limits[pname]
+    if pname in fixed.keys():
+        if not opts.QUIET:
+            print "Fixing", pname, "= %f"%fixed[PNAMES[i]]
+        FARG[pname] = fixed[PNAMES[i]]
+        FARG['fix_%s'%pname] = True
+
+
+# TODO: errordef as CL params?
+PRINTLEVEL = 0 if opts.QUIET else 1
+
+minuit = Minuit(profGoF, errordef=1, print_level=PRINTLEVEL, forced_parameters=PNAMES, **FARG)
+minuit.strategy = opts.STRATEGY
+
+import time
+start_time = time.time()
+## Lift off
+minuit.migrad()
+print("Minimisation finished after %s seconds" % (time.time() - start_time))
+
+
+## Now process the result:
+## Goodness of fit
+if not opts.QUIET:
+    chi2 = minuit.fval
+    ndof = len(DBINS) - (len(PNAMES) - len(fixed.keys()))
+    print "'chi2': %.2f --- Ndf : %i" % (chi2, ndof)
+
+## Check if result is in validity range
+result = [minuit.values[p] for p in PNAMES]
+# rok, rng = prof.is_inrange(result, pmins, pmaxs)
+
+# Max number of characters in any of parameter names --- for formatting (ljust)
+LMAX=max([len(p) for p in PNAMES])
+
+## Write out result
+with open("%s_results.txt" % opts.OUTPUT,"w") as f:
+    ## Meta info
+    f.write("# ProfVersion: %s\n" % prof.version())
+    f.write("# Date: %s\n" % prof.mk_timestamp())
+    f.write("# InterpolationFile: %s\n" % os.path.abspath(IFILE))
+    f.write("# DataDirectory: %s\n" % os.path.abspath(REFDIR))
+    ## Limits
+    lstring = ""
+    for p in PNAMES:
+        if limits.has_key(p):
+            lstring += "\n#\t%s\t%f %f" % (p.ljust(LMAX), limits[p][0], limits[p][1])
+    f.write("#\n# Limits: %s" % lstring)
+    # Fixed parameters
+    fstring = ""
+    for p in PNAMES:
+        if fixed.has_key(p):
+            fstring += "\n#\t%s\t%f" % (p.ljust(LMAX), fixed[p])
+    f.write("\n#\n# Fixed: %s\n" % fstring)
+    f.write("#\n# Minimisation result:\n#\n")
+    ## The tuned parameter values
+    for i, p in enumerate(PNAMES):
+        f.write("%s\t%f\n" % (p.ljust(LMAX), minuit.values[PNAMES[i]]))
+
+    # Correlation matrix --- if params are fixed the covariance is not defined
+    # The keys of minuit.covariance are tuples of strings
+    f.write("#\n# Correlation matrix:\n#\n")
+    t1, t2 = zip(*minuit.covariance.keys())
+    l1=list(t1)
+    CNAMES=list(set(l1))
+
+    from math import sqrt
+    for i in PNAMES:
+        s="# %s"%i.ljust(LMAX)
+        for j in PNAMES:
+            if i in CNAMES and j in CNAMES:
+                if minuit.covariance[(i,j)] >=0:
+                    s+= "    %.2f"%(minuit.covariance[(i,j)]/(sqrt(minuit.covariance[(i,i)])*sqrt(minuit.covariance[(j,j)])))
+                else:
+                    s+= "   %.2f"%(minuit.covariance[(i,j)]/(sqrt(minuit.covariance[(i,i)])*sqrt(minuit.covariance[(j,j)])))
+            else:
+                s+= "    ---"
+        f.write(s+"\n")
+    # Weights ---  dump them all at the end
+    f.write("#\n#\n# Weights used\n#\n")
+    #
+    if matchers is None:
+        for k in IHISTOS.keys():
+            f.write("# %s\t1.0\n"%k)
+    else:
+        with open(opts.WFILE) as g:
+            for line in g:
+                l=line.strip()
+                if len(l)==0 or l.startswith("#"):
+                    continue
+                f.write("# %s\n"%l)
+
+
+
+## Write out ipolhistos
+try:
+    import yoda
+    result = [minuit.values[name] for name in PNAMES]
+    scatters=[IHISTOS[k].toDataHisto(result).toScatter2D() for k in sorted(IHISTOS.keys())]
+    yoda.writeYODA(scatters, "%s_ipolhistos.yoda" % opts.OUTPUT)
+except ImportError:
+    print "Unable to import yoda, not writing out ipolhistos"
