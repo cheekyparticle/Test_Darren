@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+
+__doc__="""
+Bla
+"""
+
+import sys
+
+try:
+    import yoda
+except ImportError:
+    print "YODA not found, exiting"
+    sys.exit(1)
+
+import optparse, os, sys
+op = optparse.OptionParser(usage=__doc__)
+op.add_option("-p", "--pathprefix", dest="PREFIX", default="/DM", help="The path prefix for the yoda objects")
+op.add_option("-o", "--outfile", dest="OUTFILE", default="Aeterna.yoda", help="The output file name")
+op.add_option("-f", "--filename", dest="FNAMES", action="append", default=[], help="The file names to convert")
+op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="Turn off messages")
+opts, args = op.parse_args()
+
+def getBinning(fname):
+    """
+    Return bin centers and (half) bindwidths
+    """
+    import numpy
+    try:
+        D=numpy.loadtxt(fname)
+    except:
+        D=numpy.loadtxt(fname, skiprows=1)
+    Xmin = D[:,0]
+    Xmax = D[:,1]
+    DX=0.5*(Xmax-Xmin)
+    return zip(Xmin+DX, DX)
+
+def getNDataColumns(fname):
+    """
+    Get number of data columns
+    """
+    import numpy
+    try:
+        D=numpy.loadtxt(fname)
+    except:
+        D=numpy.loadtxt(fname, skiprows=1)
+    return D.shape[-1] - 2
+
+def getColumn(fname, ncol, useabs=True):
+    """
+    Get the ncol-th column from text file
+    """
+    import numpy
+    try:
+        D=numpy.loadtxt(fname)
+    except:
+        D=numpy.loadtxt(fname, skiprows=1)
+    if useabs:
+        return abs(D[:,ncol])
+    else:
+        return D[:,ncol]
+
+def mkYODA(binning, data, pathname, logy=True):
+    """
+    Make a single yoda Scatter2D
+    TODO: will we ever encounter errors on data?
+    NOTE: If logy is true and we encounter negative numbers,
+    the bin content will be set to 0 and the error to -1
+    to allow a posteriori filtering.
+    """
+    import yoda
+
+    from math import log
+    points = []
+    for num, b in enumerate(binning):
+        x, dx = b
+        y = data[num]
+        if logy:
+            try:
+                dy=0
+                points.append(yoda.Point2D(x, log(y), dx, dy))
+            except Exception, e:
+                points.append(yoda.Point2D(x, 0, dx, -1))
+        else:
+            points.append(yoda.Point2D(x, y, dx, dy))
+
+    s = yoda.Scatter2D(pathname)
+    for p in points:
+        s.addPoint(p)
+    return s
+
+# https://stackoverflow.com/questions/5351766/use-fnmatch-filter-to-filter-files-by-more-than-one-possible-file-extension
+def isWantedFile(fname, wanted):
+    return fname in wanted
+
+def findFiles(theroot, fnames):
+    """
+    This created a dictionary with run directories as keys and
+    list of matched filenames as values
+    """
+    import os
+    runs = {}
+    for root, dirnames, allfiles in os.walk(theroot):
+        matches = []
+        for filename in filter(lambda x: isWantedFile(x, fnames), allfiles):
+            matches.append(os.path.join(root, filename))
+        runs[root] = matches
+    return runs
+
+def getColumnHead(fname, ncol):
+    with open(fname) as f:
+        l=f.readline().lstrip("#").strip().split()
+    return l[ncol]
+
+R = findFiles(args[0], opts.FNAMES)
+
+
+# https://stackoverflow.com/questions/21839208/dictionary-with-lists-as-values-find-longest-list
+# Use this key to get the binning
+max_key = max(R, key= lambda x: len(set(R[x])))
+
+BINNINGS  = {}
+NDATACOLS = {}
+SUBPATHS  = {}
+for fname in opts.FNAMES:
+    thisF = filter(lambda x: fname in x, R[max_key])[0]
+    BINNINGS[fname]  = getBinning(thisF)
+    NDATACOLS[fname] = getNDataColumns(thisF)
+    SUBPATHS[fname] = fname.split(".")[0]
+
+
+for k, v in R.iteritems():
+    YODAS = []
+    for fname in opts.FNAMES:
+        for n in xrange(NDATACOLS[fname]):
+            nc = n+2
+            try:
+                thisF = filter(lambda x: fname in x, v)[0]
+                Y=getColumn(thisF, nc)
+                head=getColumnHead(thisF,nc)
+                # NOTE this bit figures out whether we have datafile, e.g. not headers whatsoever
+                try:
+                    float(head) # in the case the column head is a number, assume we have a datafile
+                    pathname="%s/%s"%(opts.PREFIX, SUBPATHS[fname])
+                except:
+                    pathname="%s/%s/%s"%(opts.PREFIX, SUBPATHS[fname], head)
+                YODAS.append(mkYODA(BINNINGS[fname], Y, pathname))
+            except:
+                if opts.DEBUG:
+                    print "Warning, folder %s does not have file %s"%(k, fname)
+                pass
+    outpath=thisF.split(fname)[0]
+    outfile = os.path.join(outpath, opts.OUTFILE)
+    yoda.writeYODA(YODAS, outfile)
+
+
+
+
+
+# from IPython import embed
+# embed()
+sys.exit(0)
+
+
