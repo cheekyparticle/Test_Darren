@@ -1,12 +1,13 @@
-IPOLCONFIG = "Example_for_Darren/ipol.config"
-CONFIG = "Example_for_Darren/config.dat"
-VETOFN = "constrained_params2.py"
-DATADIR = "Example_for_Darren/BPs/100_less/"
+IPOLCONFIG = "ipol.config"
+CONFIG = "config.dat"
+VETOFN = "../constrained_params2.py"
 QUIET = False
-IPOLPATH = "Example_for_Darren/scan/"
-IPOLFILES = ["ipol_All_sub0", "ipol_All_sub1","ipol_All_sub2", "ipol_All_sub3",
-             "ipol_All_sub4","ipol_All_sub5", "ipol_All_sub6", "ipol_All_sub7", "ipol_All_sub8"]
-LIMITS = None 
+import glob
+IPOLPATH = "Polys"
+IPOLFILES = glob.glob(IPOLPATH+"/*")
+print IPOLFILES
+
+LIMITS = None
 EXTRAPARAMS = None
 import sys
 
@@ -136,8 +137,8 @@ class SuperSignalGenerator(object):
                 #print distances
                 #print P.keys()
                 #print min(distances)
-                
-                winner = min(distances)   
+
+                winner = min(distances)
                 # return None
                 if "mdm" in P.keys():
                     box2 = None
@@ -146,9 +147,9 @@ class SuperSignalGenerator(object):
                         if self.pInMassBox(P, d):
                             #print "made it here"
                             box2 = d
-                            
-                            
-                    
+
+
+
                     if box2 is None:
                         print ("Polynomials are extrapolating, they haven't been trained for this!\r")
                         self._currentpatch=self._centerdict[distances[winner]]
@@ -158,8 +159,8 @@ class SuperSignalGenerator(object):
                         return self._boxdict[box2].val(P, nbin)
 
                 else:
-                    
-                    print ("Polynomials are extrapolating, they haven't been trained for this\r!")
+
+                    print ("Polynomials are extrapolating, they haven't been trained for this loop 1\r!")
                     self._currentpatch=self._centerdict[distances[winner]]
                     return self._centerdict[distances[winner]].val(P, nbin)
 
@@ -188,7 +189,7 @@ class SuperSignalGenerator(object):
     def xmin(self, nb):
         # Assuming that all bits are consistent, simply pick up the binning from one of the generators
         return self._generators[0].xmin(nb)
-    
+
     def xmax(self, nb):
         # Assuming that all bits are consistent, simply pick up the binning from one of the generators
         return self._generators[0].xmax(nb)
@@ -323,7 +324,7 @@ class SignalGenerator(object):
     def xmin(self, nbin):
         I, pidx = self._ihistos[self._terms[0]]
         return I.bins[nbin].xmin
-    
+
     def xmax(self, nbin):
         I, pidx = self._ihistos[self._terms[0]]
         return I.bins[nbin].xmax
@@ -350,41 +351,26 @@ if VETOFN:
     VETOFN = constraint_vesc
 
 
-
-
-## Get mandatory options
-if DATADIR is None:
-    print "No datadir specified... exiting\n\n"
-    op.print_usage()
-    sys.exit(1)
-
 ## Config file is also mandatory
 if CONFIG is None:
     print "Error, no config file for likelihood given, exiting"
     sys.exit(1)
-    
+
 ## Load Professor and show the standard banner
 import professor2 as prof
 if not QUIET:
     print prof.logo
-## Read interpolated and reference histos, and run data
-REFDIR = DATADIR
 
-# The data thingie
-DHISTOS = prof.read_all_histos(REFDIR)
-if len(DHISTOS.keys())==0:
-    print "Error, could not load any yoda files from folder", REFDIR
-    exit(1)
 
 # Test if requested ipol files actually exist
 IPOL_FULL=[]
 for a in IPOLFILES:
-    IPOL_FULL.append(IPOLPATH+a)
-    if not os.path.exists(IPOLPATH+a):
+    IPOL_FULL.append(a)
+    if not os.path.exists(a):
         print "Error, ipol file %s does not exist"%a
         sys.exit(1)
 
-    
+
 
 # Parameterisation related stuff
 ICNF={}
@@ -415,42 +401,11 @@ with open(CONFIG) as f:
             USEBINS[k] = usebins
         else:
             k=kraw
-        if not k in DHISTOS.keys():
-            print "Error, requested data histo %s not found in folder %s. Please setup you config to specify on of these:"%(k, DATADIR)
-            for d in DHISTOS.keys():
-                print d
+            print "set the bins you want to read in your config file!"
             sys.exit(1)
         print IPOL_FULL
         SIGNALS[k] = SuperSignalGenerator(IPOL_FULL, expr.strip(), LIMITS, EXTRAPARAMS, ICNF)
 
-## Prepare lists of ibins and dbins
-from scipy.special import gamma
-from math import exp, log
-DBINS, DVALS, log_DGAMMA = {}, {}, {}
-available=[x for x in sorted(DHISTOS.keys()) if x in SIGNALS.keys()]
-for a in available:
-    DBINS[a]=[]
-    DVALS[a]=[]
-    log_DGAMMA[a]=[]
-    for nb in xrange(len(DHISTOS[a].bins)):
-        if USEBINS.has_key(a):
-            if len(USEBINS[a])>0:
-                if nb < USEBINS[a][0] or nb>USEBINS[a][1]:
-                    continue
-        data    = DHISTOS[a].bins[nb].val # log
-        dataerr = DHISTOS[a].bins[nb].err # log
-        if dataerr <0:
-            DVALS[a].append(0.0)
-        else:
-            DBINS[a].append(DHISTOS[a].bins[nb]) # log
-            DVALS[a].append(exp(data)) # non log
-            if DVALS[a][-1] < 50: #"Use gamm when smaller than 50"
-                log_DGAMMA[a].append(log(gamma(DVALS[a][-1]+1))) # Needs understanding
-            else:
-                log_DGAMMA[a].append(DVALS[a][-1] * data - DVALS[a][-1])
-
-    print "Using %i bins for %s"%(len(DVALS[a]), a)
-    
 
 activeparameters=SIGNALS[SIGNALS.keys()[0]].pnames
 PMIN=[SIGNALS[SIGNALS.keys()[0]].limits[x][0] for x in activeparameters]
@@ -459,22 +414,20 @@ PMAX=[SIGNALS[SIGNALS.keys()[0]].limits[x][1] for x in activeparameters]
 
 print PMIN
 print PMAX
-    
+
 PP = {}
 for x in activeparameters:
     just_above_min = SIGNALS[SIGNALS.keys()[0]].limits[x][0] + 0.05* SIGNALS[SIGNALS.keys()[0]].limits[x][0]
     PP[x]=just_above_min
 
-print PP
 #PP['halo_rhochi']=0.4
 #PP['halo_v0']= 220.0
 #PP['halo_vesc']=544.0
 #PP['halo_k']=2.0
 
 
-log_N_ipol, N_ipol, ibins_xmin = {}, {}, {}
+N_ipol, ibins_xmin = {}, {}
 for datakey, signal in SIGNALS.iteritems():
-    log_N_ipol[datakey]= []
     N_ipol[datakey]     = []
     ibins_xmin[datakey] = []
     if VETOFN and  "mdm" in activeparameters and "halo_vesc" in activeparameters:
@@ -483,21 +436,22 @@ for datakey, signal in SIGNALS.iteritems():
         Emax = VETOFN(PP["mdm"], datakey)
     else:
         Emax = float("inf")
-    for nb in xrange(len(DVALS[datakey])):
+    print "here", usebins
+    for nb in xrange(usebins[1]-usebins[0]):
+        nb+=usebins[0]
         if Emax < signal.xmin(nb):
             #print 'if1'
             N_ipol[datakey].append(0)
-            log_N_ipol[datakey].append(-200)
         else:
             v=signal.val(PP,nb)
             if v is not None:
                 N_ipol[datakey].append(signal.val(PP,nb))
-                log_N_ipol[datakey].append(log(N_ipol[datakey][-1]))
+
             else:
                 print "Current point:", PP
                 print signal._currentpatch
                 print "Maybe use/adjust --limts?"
-                
+
 print N_ipol
 
 
@@ -513,7 +467,8 @@ def ret_ipol(PP):
             Emax = VETOFN(PP["mdm"], datakey)
         else:
             Emax = float("inf")
-        for nb in xrange(len(DVALS[datakey])):
+        for nb in xrange(usebins[1]-usebins[0]):
+            nb+=usebins[0]
             if Emax < signal.xmin(nb):
                 #print 'if1'
                 N_ipol[datakey].append(0)
@@ -532,97 +487,35 @@ def ret_ipol(PP):
 
 
 
-def plot_ipol(PP):
+def plot_ipol(mdm=SIGNALS[SIGNALS.keys()[0]].limits["mdm"][0],
+              c1=SIGNALS[SIGNALS.keys()[0]].limits["c1"][0],
+              c6=SIGNALS[SIGNALS.keys()[0]].limits["c6"][0],
+              c10=SIGNALS[SIGNALS.keys()[0]].limits["c10"][0]):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    PP = {"mdm":mdm, "c1":c1, "c6":c6, "c10":c10}
 
-
-    f, axarr = plt.subplots(3, 1, figsize=(6,10))
-
-    f.subplots_adjust(hspace=.3)
-    i=-1
 
     for datakey, signal in SIGNALS.iteritems():
-        #print datakey
-        i += 1
 
         Eleft = {datakey:[]}
         Eright = {datakey:[]}
-        for nb in xrange(len(DVALS[datakey])):
+        for nb in xrange(usebins[1]-usebins[0]):
+            nb+=usebins[0]
             Eleft[datakey].append(signal.xmin(nb))
             Eright[datakey].append(signal.xmax(nb))
 
         #print datakey
-        axarr[i].bar(Eleft[datakey],ret_ipol(PP)[datakey],
+        plt.bar(Eleft[datakey],ret_ipol(PP)[datakey],
                  (np.asarray(Eright[datakey][:])
                   -np.asarray(Eleft[datakey][:])),
                  color = 'white', linewidth=3.0, edgecolor = 'black',
-                linestyle='dashed', alpha=0.5)
+                linestyle='dashed')
 
-        axarr[i].bar(Eleft[datakey],DVALS[datakey][:],
-                 (np.asarray(Eright[datakey][:])
-                  -np.asarray(Eleft[datakey][:])),
-                 color = 'white', linewidth=3.0, edgecolor = 'red',
-                     alpha=0.5)
-        axarr[i].set_title(datakey.split('/')[2])
-
-    #plt.title('Scalar - Scalar')
-    #plt.savefig('SS.pdf')
-    plt.show()
-    return
-
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-
-def plot_ipol_notdic(mdm,c1,c11):
-    
-    PP = {"mdm":mdm, "c1":c1, "c11":c11}
-    f, axarr = plt.subplots(3, 1, figsize=(6,10))
-
-    f.subplots_adjust(hspace=.3)
-    i=-1
-    
-    for datakey, signal in SIGNALS.iteritems():
-        #print datakey
-        i += 1
-   
-        Eleft = {datakey:[]}
-        Eright = {datakey:[]}
-        for nb in xrange(len(DVALS[datakey])):
-            Eleft[datakey].append(signal.xmin(nb))
-            Eright[datakey].append(signal.xmax(nb))
-    
-        #print datakey
-        axarr[i].bar(Eleft[datakey],ret_ipol(PP)[datakey],
-                 (np.asarray(Eright[datakey][:])
-                  -np.asarray(Eleft[datakey][:])), 
-                 color = 'white', linewidth=3.0, edgecolor = 'black',
-                linestyle='dashed', alpha=0.5)
-
-        axarr[i].bar(Eleft[datakey],DVALS[datakey][:],
-                 (np.asarray(Eright[datakey][:])
-                  -np.asarray(Eleft[datakey][:])), 
-                 color = 'white', linewidth=3.0, edgecolor = 'red', 
-                     alpha=0.5)
-        axarr[i].set_title(datakey.split('/')[2])
+        plt.title(datakey.split('/')[2])
+        plt.ylabel('Counts')
+        plt.xlabel('Recoil Energy [keV]')
 
     #plt.savefig(pdfpath)
     plt.show()
-    return 
-
-def widget_show(PP):
-
-
-	import ipywidgets as wg
-	from IPython.display import display
-
-	m_slide = wg.FloatSlider(value = PP['mdm'] , min = PMIN[0], max = PMAX[0], description =r'$\log_{10}(m_{\chi})$')
-	c1_slide = wg.FloatSlider(value = PP['c1'] , min = PMIN[1], max = PMAX[1], description=r'$\log_{10}(c_1)$')
-	c11_slide = wg.FloatSlider(value = PP['c11'] , min = PMIN[2], max = PMAX[2], description=r'$\log_{10}(c_{11})$')
-
-
-	button = wg.interact_manual(plot_ipol_notdic, mdm=m_slide,c1=c1_slide, c11=c11_slide)
-	display(button)
-
-
+    return
