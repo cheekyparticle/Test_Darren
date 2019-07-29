@@ -506,7 +506,7 @@ def plot_ipol(mdm=SIGNALS[SIGNALS.keys()[0]].limits["mdm"][0],
             Eright[datakey].append(signal.xmax(nb))
 
         #print datakey
-        plt.bar(Eleft[datakey],ret_ipol(PP)[datakey],
+        plt.bar(((np.asarray(Eleft[datakey][:])+np.asarray(Eright[datakey][:]))/2.0),ret_ipol(PP)[datakey],
                  (np.asarray(Eright[datakey][:])
                   -np.asarray(Eleft[datakey][:])),
                  color = 'white', linewidth=3.0, edgecolor = 'black',
