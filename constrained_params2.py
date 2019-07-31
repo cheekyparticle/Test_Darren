@@ -1,7 +1,7 @@
 from __future__ import division
 from math import log
 
-def constraint_vesc(logmchi, experiment, vesc = 756.0):
+def constraint_vesc(logmchi, experiment, vesc = 744.0):
     #print logmchi
     mchi = 10**logmchi
     bits = experiment.split("/")
